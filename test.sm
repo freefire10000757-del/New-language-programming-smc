@@ -1,0 +1,9 @@
+craft main():
+    let x = 10
+    when x > 5:
+        draw("x كبير")
+    refuse:
+        draw("x صغير")
+    end
+    give 0
+end
