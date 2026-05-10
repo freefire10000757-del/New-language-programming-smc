@@ -1,0 +1,1198 @@
+## ╔══════════════════════════════════════════════════════════╗
+## ║       Shield (SM) Self-Hosted Compiler v1.0             ║
+## ║     مترجم Shield مكتوب بلغة Shield نفسها               ║
+## ║   يولّد bytecode .smbc مباشرة — بدون Python             ║
+## ╚══════════════════════════════════════════════════════════╝
+##
+## الاستخدام (مرحلياً عبر Python آخر مرة):
+##   python3 sm run smc.sm mycode.sm
+## بعد الاكتمال:
+##   shield-vm smc.smbc mycode.sm
+
+## ══════════════════════════════════════════
+##  الأدوات المساعدة
+## ══════════════════════════════════════════
+
+fn str_eq(a, b) {
+    return a == b
+}
+
+fn list_has(lst, val) {
+    for item in lst {
+        if item == val {
+            return true
+        }
+    }
+    return false
+}
+
+fn list_index(lst, val) {
+    let i = 0
+    for item in lst {
+        if item == val { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+fn str_is_digit(ch) {
+    return ch == "0" or ch == "1" or ch == "2" or ch == "3" or
+           ch == "4" or ch == "5" or ch == "6" or ch == "7" or
+           ch == "8" or ch == "9"
+}
+
+fn str_is_alpha(ch) {
+    let lowers = ["a","b","c","d","e","f","g","h","i","j","k","l","m",
+                  "n","o","p","q","r","s","t","u","v","w","x","y","z",
+                  "A","B","C","D","E","F","G","H","I","J","K","L","M",
+                  "N","O","P","Q","R","S","T","U","V","W","X","Y","Z","_"]
+    return list_has(lowers, ch)
+}
+
+fn str_is_alnum(ch) {
+    return str_is_alpha(ch) or str_is_digit(ch)
+}
+
+fn int_to_str(n) {
+    if n == 0 { return "0" }
+    let neg = false
+    if n < 0 { neg = true; n = 0 - n }
+    let digits = ["0","1","2","3","4","5","6","7","8","9"]
+    let result = ""
+    while n > 0 {
+        let d = n % 10
+        result = digits[d] + result
+        n = n / 10
+    }
+    if neg { result = "-" + result }
+    return result
+}
+
+## ══════════════════════════════════════════
+##  TOKEN — رمز الكود
+## ══════════════════════════════════════════
+
+struct Token {
+    kind
+    value
+    line
+    fn init(self, k, v, l) {
+        self.kind  = k
+        self.value = v
+        self.line  = l
+    }
+}
+
+## ══════════════════════════════════════════
+##  LEXER — المحلل المعجمي
+## ══════════════════════════════════════════
+
+let KEYWORDS = [
+    "let","const","fn","return","if","elif","else",
+    "while","for","in","break","continue",
+    "true","false","null",
+    "print","input","and","or","not",
+    "struct","new","try","catch","throw",
+    "len","range","type"
+]
+
+struct Lexer {
+    src
+    pos
+    line
+    tokens
+    fn init(self, source) {
+        self.src    = source
+        self.pos    = 0
+        self.line   = 1
+        self.tokens = []
+    }
+    fn at_end(self) {
+        return self.pos >= len(self.src)
+    }
+    fn cur(self) {
+        if self.at_end() { return "" }
+        return self.src[self.pos]
+    }
+    fn peek_next(self) {
+        if self.pos + 1 >= len(self.src) { return "" }
+        return self.src[self.pos + 1]
+    }
+    fn advance(self) {
+        let ch = self.src[self.pos]
+        self.pos = self.pos + 1
+        return ch
+    }
+    fn add(self, kind, value) {
+        self.tokens.push(new Token(kind, value, self.line))
+    }
+    fn skip_comment(self) {
+        while not self.at_end() and self.cur() != "\n" {
+            self.advance()
+        }
+    }
+    fn read_string(self) {
+        self.advance()
+        let result = ""
+        while not self.at_end() and self.cur() != "\"" {
+            if self.cur() == "\\" {
+                self.advance()
+                let esc = self.advance()
+                if esc == "n"  { result = result + "\n" }
+                elif esc == "t"  { result = result + "\t" }
+                else             { result = result + esc }
+            } else {
+                result = result + self.advance()
+            }
+        }
+        self.advance()
+        return result
+    }
+    fn read_number(self) {
+        let num = ""
+        let is_float = false
+        while not self.at_end() and str_is_digit(self.cur()) {
+            num = num + self.advance()
+        }
+        if not self.at_end() and self.cur() == "." and str_is_digit(self.peek_next()) {
+            is_float = true
+            num = num + self.advance()
+            while not self.at_end() and str_is_digit(self.cur()) {
+                num = num + self.advance()
+            }
+        }
+        if is_float { return ["FLOAT", num] }
+        return ["INT", num]
+    }
+    fn read_ident(self) {
+        let word = ""
+        while not self.at_end() and str_is_alnum(self.cur()) {
+            word = word + self.advance()
+        }
+        if list_has(KEYWORDS, word) {
+            return ["KW_" + word, word]
+        }
+        return ["ID", word]
+    }
+    fn tokenize(self) {
+        while not self.at_end() {
+            let ch = self.cur()
+
+            ## تخطي المسافات
+            if ch == " " or ch == "\t" or ch == "\r" {
+                self.advance()
+
+            ## سطر جديد
+            } elif ch == "\n" {
+                self.advance()
+                self.line = self.line + 1
+
+            ## تعليقات ##
+            } elif ch == "#" {
+                self.advance()
+                if not self.at_end() and self.cur() == "#" {
+                    self.skip_comment()
+                } else {
+                    self.add("OP", "#")
+                }
+
+            ## النصوص
+            } elif ch == "\"" {
+                let s = self.read_string()
+                self.add("STRING", s)
+
+            ## الأرقام
+            } elif str_is_digit(ch) {
+                let res = self.read_number()
+                self.add(res[0], res[1])
+
+            ## المعرّفات والكلمات المفتاحية
+            } elif str_is_alpha(ch) {
+                let res = self.read_ident()
+                self.add(res[0], res[1])
+
+            ## العمليات المزدوجة
+            } elif ch == "=" {
+                self.advance()
+                if not self.at_end() and self.cur() == "=" {
+                    self.advance()
+                    self.add("OP", "==")
+                } else {
+                    self.add("OP", "=")
+                }
+            } elif ch == "!" {
+                self.advance()
+                if not self.at_end() and self.cur() == "=" {
+                    self.advance()
+                    self.add("OP", "!=")
+                } else {
+                    self.add("OP", "!")
+                }
+            } elif ch == "<" {
+                self.advance()
+                if not self.at_end() and self.cur() == "=" {
+                    self.advance()
+                    self.add("OP", "<=")
+                } else {
+                    self.add("OP", "<")
+                }
+            } elif ch == ">" {
+                self.advance()
+                if not self.at_end() and self.cur() == "=" {
+                    self.advance()
+                    self.add("OP", ">=")
+                } else {
+                    self.add("OP", ">")
+                }
+            } elif ch == "-" {
+                self.advance()
+                if not self.at_end() and self.cur() == ">" {
+                    self.advance()
+                    self.add("OP", "->")
+                } else {
+                    self.add("OP", "-")
+                }
+
+            ## العمليات البسيطة
+            } elif ch == "+" { self.advance(); self.add("OP", "+")
+            } elif ch == "*" { self.advance(); self.add("OP", "*")
+            } elif ch == "/" { self.advance(); self.add("OP", "/")
+            } elif ch == "%" { self.advance(); self.add("OP", "%")
+
+            ## الأقواس والفصل
+            } elif ch == "(" { self.advance(); self.add("LPAREN", "(")
+            } elif ch == ")" { self.advance(); self.add("RPAREN", ")")
+            } elif ch == "{" { self.advance(); self.add("LBRACE", "{")
+            } elif ch == "}" { self.advance(); self.add("RBRACE", "}")
+            } elif ch == "[" { self.advance(); self.add("LBRACK", "[")
+            } elif ch == "]" { self.advance(); self.add("RBRACK", "]")
+            } elif ch == "," { self.advance(); self.add("COMMA",  ",")
+            } elif ch == "." { self.advance(); self.add("DOT",    ".")
+            } elif ch == ":" { self.advance(); self.add("COLON",  ":")
+            } elif ch == ";" { self.advance(); self.add("SEMI",   ";")
+            } else {
+                self.advance()
+            }
+        }
+        self.add("EOF", "")
+        return self.tokens
+    }
+}
+
+## ══════════════════════════════════════════
+##  BYTECODE CONSTANTS — ثوابت التعليمات
+## ══════════════════════════════════════════
+
+let OP_PUSH_INT   = 1
+let OP_PUSH_FLOAT = 2
+let OP_PUSH_STR   = 3
+let OP_PUSH_BOOL  = 4
+let OP_PUSH_NULL  = 5
+let OP_POP        = 6
+let OP_DUP        = 7
+let OP_LOAD       = 16
+let OP_STORE      = 17
+let OP_ADD        = 32
+let OP_SUB        = 33
+let OP_MUL        = 34
+let OP_DIV        = 35
+let OP_MOD        = 36
+let OP_NEG        = 37
+let OP_EQ         = 48
+let OP_NEQ        = 49
+let OP_LT         = 50
+let OP_GT         = 51
+let OP_LE         = 52
+let OP_GE         = 53
+let OP_AND        = 64
+let OP_OR         = 65
+let OP_NOT        = 66
+let OP_JMP        = 80
+let OP_JMP_IF     = 81
+let OP_JMP_IFNOT  = 82
+let OP_CALL       = 96
+let OP_RETURN     = 97
+let OP_MAKE_FN    = 98
+let OP_MAKE_LIST  = 112
+let OP_MAKE_DICT  = 113
+let OP_INDEX_GET  = 114
+let OP_INDEX_SET  = 115
+let OP_ATTR_GET   = 116
+let OP_ATTR_SET   = 117
+let OP_PRINT      = 128
+let OP_INPUT      = 129
+let OP_HALT       = 255
+
+## ══════════════════════════════════════════
+##  CHUNK — مقطع الكود
+## ══════════════════════════════════════════
+
+struct Chunk {
+    name
+    code
+    consts
+    const_types
+    names
+    fn init(self, n) {
+        self.name        = n
+        self.code        = []
+        self.consts      = []
+        self.const_types = []
+        self.names       = []
+    }
+    fn emit(self, op) {
+        self.code.push(op)
+    }
+    fn emit_u32(self, n) {
+        ## big-endian 4 bytes
+        self.code.push((n / 16777216) % 256)
+        self.code.push((n / 65536)    % 256)
+        self.code.push((n / 256)      % 256)
+        self.code.push(n              % 256)
+    }
+    fn emit_op(self, op, arg) {
+        self.emit(op)
+        self.emit_u32(arg)
+    }
+    fn emit_jmp(self, op) {
+        self.emit(op)
+        let pos = len(self.code)
+        self.emit_u32(0)
+        return pos
+    }
+    fn patch_jmp(self, pos) {
+        let target = len(self.code)
+        self.code[pos]     = (target / 16777216) % 256
+        self.code[pos + 1] = (target / 65536)    % 256
+        self.code[pos + 2] = (target / 256)       % 256
+        self.code[pos + 3] = target               % 256
+    }
+    fn patch_jmp_to(self, pos, target) {
+        self.code[pos]     = (target / 16777216) % 256
+        self.code[pos + 1] = (target / 65536)    % 256
+        self.code[pos + 2] = (target / 256)       % 256
+        self.code[pos + 3] = target               % 256
+    }
+    fn add_const_str(self, s) {
+        let i = 0
+        for c in self.consts {
+            if self.const_types[i] == "s" and c == s { return i }
+            i = i + 1
+        }
+        self.consts.push(s)
+        self.const_types.push("s")
+        return len(self.consts) - 1
+    }
+    fn add_const_int(self, n) {
+        let i = 0
+        for c in self.consts {
+            if self.const_types[i] == "i" and c == n { return i }
+            i = i + 1
+        }
+        self.consts.push(n)
+        self.const_types.push("i")
+        return len(self.consts) - 1
+    }
+    fn add_name(self, nm) {
+        let idx = list_index(self.names, nm)
+        if idx >= 0 { return idx }
+        self.names.push(nm)
+        return len(self.names) - 1
+    }
+}
+
+## ══════════════════════════════════════════
+##  BYTECODE WRITER — كاتب الـ bytecode
+## ══════════════════════════════════════════
+
+struct Writer {
+    buf
+    fn init(self) {
+        self.buf = []
+    }
+    fn write_byte(self, b) {
+        self.buf.push(b % 256)
+    }
+    fn write_u32(self, n) {
+        self.buf.push((n / 16777216) % 256)
+        self.buf.push((n / 65536)    % 256)
+        self.buf.push((n / 256)      % 256)
+        self.buf.push(n              % 256)
+    }
+    fn write_i64(self, n) {
+        ## Shield integers — كافٍ حتى 2^32
+        self.buf.push(0); self.buf.push(0); self.buf.push(0); self.buf.push(0)
+        self.buf.push((n / 16777216) % 256)
+        self.buf.push((n / 65536)    % 256)
+        self.buf.push((n / 256)      % 256)
+        self.buf.push(n              % 256)
+    }
+    fn write_str_raw(self, s) {
+        ## كتابة النص byte-by-byte عبر ASCII codes
+        let i = 0
+        while i < len(s) {
+            let ch = s[i]
+            let code = 0
+            ## جدول ASCII الأساسي
+            if ch == " "  { code = 32  }
+            elif ch == "!" { code = 33  }
+            elif ch == "\"" { code = 34 }
+            elif ch == "#" { code = 35  }
+            elif ch == "%" { code = 37  }
+            elif ch == "(" { code = 40  }
+            elif ch == ")" { code = 41  }
+            elif ch == "*" { code = 42  }
+            elif ch == "+" { code = 43  }
+            elif ch == "," { code = 44  }
+            elif ch == "-" { code = 45  }
+            elif ch == "." { code = 46  }
+            elif ch == "/" { code = 47  }
+            elif ch == "0" { code = 48  }
+            elif ch == "1" { code = 49  }
+            elif ch == "2" { code = 50  }
+            elif ch == "3" { code = 51  }
+            elif ch == "4" { code = 52  }
+            elif ch == "5" { code = 53  }
+            elif ch == "6" { code = 54  }
+            elif ch == "7" { code = 55  }
+            elif ch == "8" { code = 56  }
+            elif ch == "9" { code = 57  }
+            elif ch == ":" { code = 58  }
+            elif ch == "<" { code = 60  }
+            elif ch == "=" { code = 61  }
+            elif ch == ">" { code = 62  }
+            elif ch == "?" { code = 63  }
+            elif ch == "A" { code = 65  }
+            elif ch == "B" { code = 66  }
+            elif ch == "C" { code = 67  }
+            elif ch == "D" { code = 68  }
+            elif ch == "E" { code = 69  }
+            elif ch == "F" { code = 70  }
+            elif ch == "G" { code = 71  }
+            elif ch == "H" { code = 72  }
+            elif ch == "I" { code = 73  }
+            elif ch == "J" { code = 74  }
+            elif ch == "K" { code = 75  }
+            elif ch == "L" { code = 76  }
+            elif ch == "M" { code = 77  }
+            elif ch == "N" { code = 78  }
+            elif ch == "O" { code = 79  }
+            elif ch == "P" { code = 80  }
+            elif ch == "Q" { code = 81  }
+            elif ch == "R" { code = 82  }
+            elif ch == "S" { code = 83  }
+            elif ch == "T" { code = 84  }
+            elif ch == "U" { code = 85  }
+            elif ch == "V" { code = 86  }
+            elif ch == "W" { code = 87  }
+            elif ch == "X" { code = 88  }
+            elif ch == "Y" { code = 89  }
+            elif ch == "Z" { code = 90  }
+            elif ch == "[" { code = 91  }
+            elif ch == "]" { code = 93  }
+            elif ch == "_" { code = 95  }
+            elif ch == "a" { code = 97  }
+            elif ch == "b" { code = 98  }
+            elif ch == "c" { code = 99  }
+            elif ch == "d" { code = 100 }
+            elif ch == "e" { code = 101 }
+            elif ch == "f" { code = 102 }
+            elif ch == "g" { code = 103 }
+            elif ch == "h" { code = 104 }
+            elif ch == "i" { code = 105 }
+            elif ch == "j" { code = 106 }
+            elif ch == "k" { code = 107 }
+            elif ch == "l" { code = 108 }
+            elif ch == "m" { code = 109 }
+            elif ch == "n" { code = 110 }
+            elif ch == "o" { code = 111 }
+            elif ch == "p" { code = 112 }
+            elif ch == "q" { code = 113 }
+            elif ch == "r" { code = 114 }
+            elif ch == "s" { code = 115 }
+            elif ch == "t" { code = 116 }
+            elif ch == "u" { code = 117 }
+            elif ch == "v" { code = 118 }
+            elif ch == "w" { code = 119 }
+            elif ch == "x" { code = 120 }
+            elif ch == "y" { code = 121 }
+            elif ch == "z" { code = 122 }
+            elif ch == "{" { code = 123 }
+            elif ch == "}" { code = 125 }
+            elif ch == "\n" { code = 10 }
+            elif ch == "\t" { code = 9  }
+            else { code = 63 }  ## '?' للرموز غير المعروفة
+            self.buf.push(code)
+            i = i + 1
+        }
+    }
+    fn write_lenstr(self, s) {
+        ## كتابة النص مع طوله أولاً
+        let tmp = new Writer()
+        tmp.write_str_raw(s)
+        self.write_u32(len(tmp.buf))
+        for b in tmp.buf { self.buf.push(b) }
+    }
+    fn write_chunk(self, chunk) {
+        let body = new Writer()
+        ## name
+        body.write_lenstr(chunk.name)
+        ## consts
+        body.write_u32(len(chunk.consts))
+        let i = 0
+        for c in chunk.consts {
+            let t = chunk.const_types[i]
+            if t == "s" {
+                body.write_byte(115)  ## 's'
+                body.write_lenstr(c)
+            } elif t == "i" {
+                body.write_byte(105)  ## 'i'
+                body.write_i64(c)
+            } elif t == "n" {
+                body.write_byte(110)  ## 'n'
+            } elif t == "b" {
+                body.write_byte(98)   ## 'b'
+                if c { body.write_byte(1) } else { body.write_byte(0) }
+            }
+            i = i + 1
+        }
+        ## names
+        body.write_u32(len(chunk.names))
+        for nm in chunk.names {
+            body.write_lenstr(nm)
+        }
+        ## code
+        body.write_u32(len(chunk.code))
+        for b in chunk.code {
+            body.buf.push(b)
+        }
+        ## write chunk size then body
+        self.write_u32(len(body.buf))
+        for b in body.buf { self.buf.push(b) }
+    }
+}
+
+## ══════════════════════════════════════════
+##  COMPILER — المُجمِّع
+## ══════════════════════════════════════════
+
+struct Compiler {
+    tokens
+    pos
+    chunks
+    fn init(self, toks) {
+        self.tokens = toks
+        self.pos    = 0
+        self.chunks = []
+    }
+    fn peek(self) {
+        return self.tokens[self.pos]
+    }
+    fn peek_kind(self) {
+        return self.tokens[self.pos].kind
+    }
+    fn peek_val(self) {
+        return self.tokens[self.pos].value
+    }
+    fn advance(self) {
+        let t = self.tokens[self.pos]
+        self.pos = self.pos + 1
+        return t
+    }
+    fn eat(self, kind) {
+        let t = self.advance()
+        if t.kind != kind {
+            print("[SMC خطأ] توقعت " + kind + " وجدت " + t.kind + " (" + t.value + ") سطر " + int_to_str(t.line))
+        }
+        return t
+    }
+    fn eat_val(self, val) {
+        let t = self.advance()
+        if t.value != val {
+            print("[SMC خطأ] توقعت '" + val + "' وجدت '" + t.value + "'")
+        }
+        return t
+    }
+    fn match_kind(self, k) {
+        return self.peek_kind() == k
+    }
+    fn match_val(self, v) {
+        return self.peek_val() == v
+    }
+
+    ## ── تجميع البرنامج كاملاً ──
+    fn compile_program(self) {
+        let main_chunk = new Chunk("<main>")
+        while self.peek_kind() != "EOF" {
+            self.compile_stmt(main_chunk)
+        }
+        main_chunk.emit(OP_HALT)
+        self.chunks.push(main_chunk)
+        return main_chunk
+    }
+
+    ## ── الجمل ──
+    fn compile_stmt(self, chunk) {
+        let k = self.peek_kind()
+        let v = self.peek_val()
+
+        if k == "KW_let" or k == "KW_const" {
+            self.compile_var_decl(chunk)
+        } elif k == "KW_fn" {
+            self.compile_fn_def(chunk)
+        } elif k == "KW_return" {
+            self.advance()
+            if self.peek_kind() != "RBRACE" and self.peek_kind() != "EOF" {
+                self.compile_expr(chunk)
+            } else {
+                chunk.emit(OP_PUSH_NULL)
+            }
+            chunk.emit(OP_RETURN)
+        } elif k == "KW_if" {
+            self.compile_if(chunk)
+        } elif k == "KW_while" {
+            self.compile_while(chunk)
+        } elif k == "KW_for" {
+            self.compile_for(chunk)
+        } elif k == "KW_print" {
+            self.compile_print(chunk)
+        } elif k == "KW_break" {
+            self.advance()
+            ## break — سيُعالَج في المستقبل
+            chunk.emit(OP_PUSH_NULL)
+            chunk.emit(OP_POP)
+        } elif k == "KW_continue" {
+            self.advance()
+        } elif k == "KW_struct" {
+            self.compile_struct(chunk)
+        } elif k == "KW_try" {
+            self.compile_try(chunk)
+        } elif k == "KW_throw" {
+            self.advance()
+            self.compile_expr(chunk)
+            chunk.emit(OP_PUSH_NULL)
+            chunk.emit(OP_POP)
+        } else {
+            self.compile_expr_stmt(chunk)
+        }
+    }
+
+    fn compile_var_decl(self, chunk) {
+        self.advance()  ## let / const
+        let name = self.eat("ID").value
+        self.eat_val("=")
+        self.compile_expr(chunk)
+        let idx = chunk.add_name(name)
+        chunk.emit_op(OP_STORE, idx)
+    }
+
+    fn compile_fn_def(self, chunk) {
+        self.eat("KW_fn")
+        let name = self.eat("ID").value
+        self.eat("LPAREN")
+
+        let params = []
+        while not self.match_kind("RPAREN") {
+            params.push(self.advance().value)
+            if self.match_kind("COMMA") { self.advance() }
+        }
+        self.eat("RPAREN")
+
+        ## إنشاء chunk للدالة
+        let fn_chunk = new Chunk(name)
+
+        ## تخزين المعاملات كمتغيرات محلية
+        ## (تُمرَّر بالترتيب من يمين لليسار في الـ VM)
+        let pi = len(params) - 1
+        while pi >= 0 {
+            let pidx = fn_chunk.add_name(params[pi])
+            fn_chunk.emit_op(OP_STORE, pidx)
+            pi = pi - 1
+        }
+
+        ## تجميع جسم الدالة
+        self.eat("LBRACE")
+        let sub = new Compiler(self.tokens)
+        sub.pos = self.pos
+        while not sub.match_kind("RBRACE") and not sub.match_kind("EOF") {
+            sub.compile_stmt(fn_chunk)
+        }
+        self.pos = sub.pos
+        self.eat("RBRACE")
+
+        ## انسخ الـ sub-chunks
+        for sc in sub.chunks {
+            self.chunks.push(sc)
+        }
+
+        fn_chunk.emit(OP_PUSH_NULL)
+        fn_chunk.emit(OP_RETURN)
+        self.chunks.push(fn_chunk)
+
+        ## أنشئ قيمة الدالة في الـ chunk الأب
+        let cidx = chunk.add_const_str(name)
+        chunk.emit_op(OP_MAKE_FN, cidx)
+        let vidx = chunk.add_name(name)
+        chunk.emit_op(OP_STORE, vidx)
+    }
+
+    fn compile_block(self, chunk) {
+        self.eat("LBRACE")
+        while not self.match_kind("RBRACE") and not self.match_kind("EOF") {
+            self.compile_stmt(chunk)
+        }
+        self.eat("RBRACE")
+    }
+
+    fn compile_if(self, chunk) {
+        self.eat("KW_if")
+        self.compile_expr(chunk)
+        let jf = chunk.emit_jmp(OP_JMP_IFNOT)
+        self.compile_block(chunk)
+
+        let end_jumps = []
+
+        while self.match_kind("KW_elif") {
+            self.advance()
+            let je = chunk.emit_jmp(OP_JMP)
+            end_jumps.push(je)
+            chunk.patch_jmp(jf)
+            self.compile_expr(chunk)
+            jf = chunk.emit_jmp(OP_JMP_IFNOT)
+            self.compile_block(chunk)
+        }
+
+        if self.match_kind("KW_else") {
+            self.advance()
+            let je2 = chunk.emit_jmp(OP_JMP)
+            end_jumps.push(je2)
+            chunk.patch_jmp(jf)
+            self.compile_block(chunk)
+        } else {
+            chunk.patch_jmp(jf)
+        }
+
+        for ej in end_jumps {
+            chunk.patch_jmp(ej)
+        }
+    }
+
+    fn compile_while(self, chunk) {
+        self.eat("KW_while")
+        let loop_start = len(chunk.code)
+        self.compile_expr(chunk)
+        let jf = chunk.emit_jmp(OP_JMP_IFNOT)
+        self.compile_block(chunk)
+        ## العودة لبداية الحلقة
+        chunk.emit(OP_JMP)
+        chunk.emit_u32(loop_start)
+        chunk.patch_jmp(jf)
+    }
+
+    fn compile_for(self, chunk) {
+        self.eat("KW_for")
+        let var_name = self.eat("ID").value
+        self.eat("KW_in")
+        self.compile_expr(chunk)
+
+        ## تخزين المصفوفة في متغير مؤقت
+        let iter_name = "__iter_" + var_name + "__"
+        let ctr_name  = "__ctr_"  + var_name + "__"
+        let iter_idx  = chunk.add_name(iter_name)
+        let ctr_idx   = chunk.add_name(ctr_name)
+        chunk.emit_op(OP_STORE, iter_idx)
+        chunk.emit_op(OP_PUSH_INT, 0)
+        chunk.emit_op(OP_STORE, ctr_idx)
+
+        let loop_start = len(chunk.code)
+
+        ## شرط: counter < len(iter)
+        chunk.emit_op(OP_LOAD, ctr_idx)
+        chunk.emit_op(OP_LOAD, iter_idx)
+        let len_idx = chunk.add_const_str("len")
+        chunk.emit_op(OP_ATTR_GET, len_idx)
+        chunk.emit(OP_LT)
+
+        let jf = chunk.emit_jmp(OP_JMP_IFNOT)
+
+        ## تحميل العنصر الحالي
+        chunk.emit_op(OP_LOAD, iter_idx)
+        chunk.emit_op(OP_LOAD, ctr_idx)
+        chunk.emit(OP_INDEX_GET)
+        let var_idx = chunk.add_name(var_name)
+        chunk.emit_op(OP_STORE, var_idx)
+
+        self.compile_block(chunk)
+
+        ## زيادة العداد
+        chunk.emit_op(OP_LOAD, ctr_idx)
+        chunk.emit_op(OP_PUSH_INT, 1)
+        chunk.emit(OP_ADD)
+        chunk.emit_op(OP_STORE, ctr_idx)
+
+        chunk.emit(OP_JMP)
+        chunk.emit_u32(loop_start)
+        chunk.patch_jmp(jf)
+    }
+
+    fn compile_print(self, chunk) {
+        self.eat("KW_print")
+        self.eat("LPAREN")
+        let count = 0
+        while not self.match_kind("RPAREN") {
+            self.compile_expr(chunk)
+            count = count + 1
+            if self.match_kind("COMMA") { self.advance() }
+        }
+        self.eat("RPAREN")
+        chunk.emit_op(OP_PRINT, count)
+    }
+
+    fn compile_struct(self, chunk) {
+        self.eat("KW_struct")
+        let name = self.eat("ID").value
+        self.eat("LBRACE")
+        while self.match_kind("KW_fn") {
+            self.compile_fn_def(chunk)
+        }
+        while not self.match_kind("RBRACE") {
+            self.advance()
+        }
+        self.eat("RBRACE")
+    }
+
+    fn compile_try(self, chunk) {
+        self.eat("KW_try")
+        self.compile_block(chunk)
+        if self.match_kind("KW_catch") {
+            self.advance()
+            if self.match_kind("ID") { self.advance() }
+            self.compile_block(chunk)
+        }
+    }
+
+    fn compile_expr_stmt(self, chunk) {
+        self.compile_expr(chunk)
+        chunk.emit(OP_POP)
+    }
+
+    ## ── التعبيرات ──
+    fn compile_expr(self, chunk) {
+        self.compile_assign(chunk)
+    }
+
+    fn compile_assign(self, chunk) {
+        self.compile_or(chunk)
+        if self.match_kind("OP") and self.match_val("=") {
+            ## تحقق أنها ليست ==
+            self.advance()
+            self.compile_expr(chunk)
+            ## TODO: handle index/attr assignment
+        }
+    }
+
+    fn compile_or(self, chunk) {
+        self.compile_and(chunk)
+        while self.match_kind("KW_or") {
+            self.advance()
+            self.compile_and(chunk)
+            chunk.emit(OP_OR)
+        }
+    }
+
+    fn compile_and(self, chunk) {
+        self.compile_compare(chunk)
+        while self.match_kind("KW_and") {
+            self.advance()
+            self.compile_compare(chunk)
+            chunk.emit(OP_AND)
+        }
+    }
+
+    fn compile_compare(self, chunk) {
+        self.compile_add(chunk)
+        let k = self.peek_kind()
+        let v = self.peek_val()
+        if k == "OP" and (v == "==" or v == "!=" or v == "<" or v == ">" or v == "<=" or v == ">=") {
+            self.advance()
+            self.compile_add(chunk)
+            if v == "==" { chunk.emit(OP_EQ)  }
+            elif v == "!=" { chunk.emit(OP_NEQ) }
+            elif v == "<"  { chunk.emit(OP_LT)  }
+            elif v == ">"  { chunk.emit(OP_GT)  }
+            elif v == "<=" { chunk.emit(OP_LE)  }
+            elif v == ">=" { chunk.emit(OP_GE)  }
+        }
+    }
+
+    fn compile_add(self, chunk) {
+        self.compile_mul(chunk)
+        while self.match_kind("OP") and (self.match_val("+") or self.match_val("-")) {
+            let op = self.advance().value
+            self.compile_mul(chunk)
+            if op == "+" { chunk.emit(OP_ADD) }
+            else         { chunk.emit(OP_SUB) }
+        }
+    }
+
+    fn compile_mul(self, chunk) {
+        self.compile_unary(chunk)
+        while self.match_kind("OP") and (self.match_val("*") or self.match_val("/") or self.match_val("%")) {
+            let op = self.advance().value
+            self.compile_unary(chunk)
+            if op == "*" { chunk.emit(OP_MUL) }
+            elif op == "/" { chunk.emit(OP_DIV) }
+            else           { chunk.emit(OP_MOD) }
+        }
+    }
+
+    fn compile_unary(self, chunk) {
+        if self.match_kind("KW_not") {
+            self.advance()
+            self.compile_unary(chunk)
+            chunk.emit(OP_NOT)
+        } elif self.match_kind("OP") and self.match_val("-") {
+            self.advance()
+            self.compile_unary(chunk)
+            chunk.emit(OP_NEG)
+        } else {
+            self.compile_postfix(chunk)
+        }
+    }
+
+    fn compile_postfix(self, chunk) {
+        self.compile_primary(chunk)
+        let running = true
+        while running {
+            if self.match_kind("LPAREN") {
+                self.advance()
+                let argc = 0
+                while not self.match_kind("RPAREN") {
+                    self.compile_expr(chunk)
+                    argc = argc + 1
+                    if self.match_kind("COMMA") { self.advance() }
+                }
+                self.eat("RPAREN")
+                chunk.emit_op(OP_CALL, argc)
+            } elif self.match_kind("LBRACK") {
+                self.advance()
+                self.compile_expr(chunk)
+                self.eat("RBRACK")
+                if self.match_kind("OP") and self.match_val("=") {
+                    self.advance()
+                    self.compile_expr(chunk)
+                    chunk.emit_op(OP_INDEX_SET, 0)
+                } else {
+                    chunk.emit(OP_INDEX_GET)
+                }
+            } elif self.match_kind("DOT") {
+                self.advance()
+                let attr = self.advance().value
+                if self.match_kind("LPAREN") {
+                    ## استدعاء method
+                    self.advance()
+                    let argc2 = 0
+                    while not self.match_kind("RPAREN") {
+                        self.compile_expr(chunk)
+                        argc2 = argc2 + 1
+                        if self.match_kind("COMMA") { self.advance() }
+                    }
+                    self.eat("RPAREN")
+                    let aidx = chunk.add_const_str(attr)
+                    chunk.emit_op(OP_ATTR_GET, aidx)
+                    chunk.emit_op(OP_CALL, argc2)
+                } elif self.match_kind("OP") and self.match_val("=") {
+                    self.advance()
+                    self.compile_expr(chunk)
+                    let aidx2 = chunk.add_const_str(attr)
+                    chunk.emit_op(OP_ATTR_SET, aidx2)
+                } else {
+                    let aidx3 = chunk.add_const_str(attr)
+                    chunk.emit_op(OP_ATTR_GET, aidx3)
+                }
+            } else {
+                running = false
+            }
+        }
+    }
+
+    fn compile_primary(self, chunk) {
+        let k = self.peek_kind()
+        let v = self.peek_val()
+
+        if k == "INT" {
+            self.advance()
+            let n = 0
+            let i = 0
+            while i < len(v) {
+                let d = 0
+                let ch = v[i]
+                if ch == "0" { d = 0 } elif ch == "1" { d = 1 }
+                elif ch == "2" { d = 2 } elif ch == "3" { d = 3 }
+                elif ch == "4" { d = 4 } elif ch == "5" { d = 5 }
+                elif ch == "6" { d = 6 } elif ch == "7" { d = 7 }
+                elif ch == "8" { d = 8 } elif ch == "9" { d = 9 }
+                n = n * 10 + d
+                i = i + 1
+            }
+            chunk.emit_op(OP_PUSH_INT, n)
+
+        } elif k == "STRING" {
+            self.advance()
+            let sidx = chunk.add_const_str(v)
+            chunk.emit_op(OP_PUSH_STR, sidx)
+
+        } elif k == "KW_true" {
+            self.advance()
+            chunk.emit_op(OP_PUSH_BOOL, 1)
+
+        } elif k == "KW_false" {
+            self.advance()
+            chunk.emit_op(OP_PUSH_BOOL, 0)
+
+        } elif k == "KW_null" {
+            self.advance()
+            chunk.emit(OP_PUSH_NULL)
+
+        } elif k == "ID" {
+            self.advance()
+            let vidx = chunk.add_name(v)
+            chunk.emit_op(OP_LOAD, vidx)
+
+        } elif k == "KW_new" {
+            self.advance()
+            let sname = self.eat("ID").value
+            self.eat("LPAREN")
+            let argc = 0
+            while not self.match_kind("RPAREN") {
+                self.compile_expr(chunk)
+                argc = argc + 1
+                if self.match_kind("COMMA") { self.advance() }
+            }
+            self.eat("RPAREN")
+            ## load the struct init fn and call
+            let fn_name = sname + "_init"
+            let fnidx = chunk.add_name(fn_name)
+            chunk.emit_op(OP_LOAD, fnidx)
+            chunk.emit_op(OP_CALL, argc)
+
+        } elif k == "KW_input" {
+            self.advance()
+            self.eat("LPAREN")
+            self.compile_expr(chunk)
+            self.eat("RPAREN")
+            chunk.emit_op(OP_INPUT, 0)
+
+        } elif k == "KW_len" {
+            self.advance()
+            self.eat("LPAREN")
+            self.compile_expr(chunk)
+            self.eat("RPAREN")
+            let lidx = chunk.add_const_str("len")
+            chunk.emit_op(OP_ATTR_GET, lidx)
+
+        } elif k == "LPAREN" {
+            self.advance()
+            self.compile_expr(chunk)
+            self.eat("RPAREN")
+
+        } elif k == "LBRACK" {
+            self.advance()
+            let count = 0
+            while not self.match_kind("RBRACK") {
+                self.compile_expr(chunk)
+                count = count + 1
+                if self.match_kind("COMMA") { self.advance() }
+            }
+            self.eat("RBRACK")
+            chunk.emit_op(OP_MAKE_LIST, count)
+
+        } elif k == "LBRACE" {
+            self.advance()
+            let count2 = 0
+            while not self.match_kind("RBRACE") {
+                self.compile_expr(chunk)
+                self.eat("COLON")
+                self.compile_expr(chunk)
+                count2 = count2 + 1
+                if self.match_kind("COMMA") { self.advance() }
+            }
+            self.eat("RBRACE")
+            chunk.emit_op(OP_MAKE_DICT, count2)
+
+        } else {
+            print("[SMC خطأ] رمز غير متوقع: " + k + " (" + v + ")")
+            self.advance()
+            chunk.emit(OP_PUSH_NULL)
+        }
+    }
+}
+
+## ══════════════════════════════════════════
+##  MAIN — التجميع وكتابة الملف
+## ══════════════════════════════════════════
+
+fn compile_source(src) {
+    ## 1. تحليل معجمي
+    let lexer  = new Lexer(src)
+    let tokens = lexer.tokenize()
+    print("[SMC] الرموز المُولَّدة: " + int_to_str(len(tokens)))
+
+    ## 2. تجميع
+    let compiler = new Compiler(tokens)
+    let main_chunk = compiler.compile_program()
+    print("[SMC] الـ chunks: " + int_to_str(len(compiler.chunks)))
+
+    ## 3. كتابة الـ bytecode
+    let writer = new Writer()
+
+    ## Magic: SMbc = 83 77 98 99
+    writer.write_byte(83); writer.write_byte(77)
+    writer.write_byte(98); writer.write_byte(99)
+
+    ## Version: 1
+    writer.write_u32(1)
+
+    ## عدد الـ chunks
+    let all_chunks = [main_chunk]
+    for sc in compiler.chunks {
+        if sc.name != "<main>" {
+            all_chunks.push(sc)
+        }
+    }
+    writer.write_u32(len(all_chunks))
+
+    for ch in all_chunks {
+        writer.write_chunk(ch)
+    }
+
+    return writer.buf
+}
+
+## ══════════════════════════════════════════
+##  اختبار الـ compiler
+## ══════════════════════════════════════════
+
+print("╔══════════════════════════════════════════╗")
+print("║   Shield SMC — مترجم Shield بـ Shield   ║")
+print("╚══════════════════════════════════════════╝")
+print("")
+
+## مثال بسيط للاختبار
+let test_src = "let x = 10\nlet y = 20\nprint(x + y)"
+
+print("── اختبار تجميع: " + test_src)
+let result = compile_source(test_src)
+print("── bytecode size: " + int_to_str(len(result)) + " bytes")
+print("")
+
+## التحقق من الـ magic bytes
+if result[0] == 83 and result[1] == 77 and result[2] == 98 and result[3] == 99 {
+    print("✅ Magic bytes صحيحة: SMbc")
+} else {
+    print("❌ Magic bytes خاطئة")
+}
+
+print("")
+print("✅ Shield SMC يعمل!")
+print("المرحلة القادمة: قراءة ملف .sm وكتابة .smbc")
