@@ -1,0 +1,25 @@
+start os
+
+craft greet(name):
+    draw("Welcome to Shield, " + name)
+    when name == "shield":
+        draw("Access granted. You are the admin")
+        give true
+    refuse:
+        draw("Access denied")
+        give false
+
+craft main():
+    draw("Shield Language Test")
+    username = click("Enter username: ")
+
+    is_admin = greet(username)
+
+    when is_admin:
+        draw("Launching CyberShield...")
+    refuse:
+        draw("Exiting...")
+        goout()
+
+when __name__ == "__main__":
+    main()
